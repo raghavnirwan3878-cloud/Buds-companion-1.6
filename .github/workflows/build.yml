@@ -1,0 +1,49 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Restore fixed debug keystore
+        run: |
+          echo "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" | base64 -d > debug.keystore
+
+      - name: Grant execute permission for gradlew
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            echo "No gradlew found, generating wrapper"
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BudsCompanion-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Create numbered GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/debug/app-debug.apk
+          generate_release_notes: true
