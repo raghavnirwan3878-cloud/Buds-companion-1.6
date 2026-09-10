@@ -16,10 +16,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
+        android:name=".BudsApplication"
         android:allowBackup="true"
         android:label="Devices"
         android:icon="@drawable/ic_headphones"
-        android:theme="@style/Theme.AppCompat.DayNight">
+        android:theme="@style/Theme.BudsCompanion">
 
         <activity
             android:name=".MainActivity"
@@ -53,6 +54,28 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_info" />
         </receiver>
+
+        <service
+            android:name=".BudsBatteryTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_headphones"
+            android:label="Battery"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".BudsGameModeTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_headphones"
+            android:label="Game mode"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".BudsTileService"
