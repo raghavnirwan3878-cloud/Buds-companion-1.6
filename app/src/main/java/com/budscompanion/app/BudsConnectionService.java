@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -72,6 +73,12 @@ public class BudsConnectionService extends Service {
     public static final String PREF_MONITORING_ENABLED = "monitoring_enabled";
     public static final String ACTION_LEVELS_UPDATED = "com.budscompanion.app.LEVELS_UPDATED";
     public static final String ACTION_REFRESH_BATTERY = "com.budscompanion.app.REFRESH_BATTERY";
+    public static final String ACTION_STOP_MONITORING = "com.budscompanion.app.STOP_MONITORING";
+    public static final String ACTION_REFRESH_INFO = "com.budscompanion.app.REFRESH_INFO";
+    public static final String PREF_FIRMWARE = "firmware_version";
+    public static final String PREF_GAME_MODE = "game_mode";
+    public static final String PREF_HISTORY = "battery_history";
+    public static final String PREF_ERROR_NOTIFIED = "error_notified";
     public static final String PREF_CHARGING_LEFT = "charging_left";
     public static final String PREF_CHARGING_RIGHT = "charging_right";
     public static final String PREF_CHARGING_CASE = "charging_case";
@@ -116,10 +123,27 @@ public class BudsConnectionService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForeground(NOTIF_ID_STATUS, buildStatusNotification("Starting\u2026"));
+        String action = intent != null ? intent.getAction() : null;
+        if (ACTION_REFRESH_BATTERY.equals(action)) {
+            if (running) sendBatteryRequest();
+            return START_STICKY;
+        }
+        if (ACTION_REFRESH_INFO.equals(action)) {
+            if (running) {
+                sendBatteryRequest();
+                sendFirmwareRequest();
+            }
+            return START_STICKY;
+        }
+        if (ACTION_STOP_MONITORING.equals(action)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        startForeground(NOTIF_ID_STATUS, buildStatusNotification("Starting…"));
         running = true;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean(PREF_MONITORING_ENABLED, true)
+                .putBoolean(PREF_ERROR_NOTIFIED, false)
                 .apply();
         connectLoop();
         return START_STICKY;
@@ -153,6 +177,11 @@ public class BudsConnectionService extends Service {
                     return; // nothing more we can do without the permission
                 } catch (Exception e) {
                     Log.w(TAG, "Connection attempt failed: " + e.getMessage());
+                    SharedPreferences ep = getSharedPreferences(PREFS, MODE_PRIVATE);
+                    if (!ep.getBoolean(PREF_ERROR_NOTIFIED, false)) {
+                        ep.edit().putBoolean(PREF_ERROR_NOTIFIED, true).apply();
+                        fireConnectionNotification(false, e.getMessage());
+                    }
                 }
 
                 markDisconnected();
@@ -204,11 +233,14 @@ public class BudsConnectionService extends Service {
 
         Log.i(TAG, "Connected to " + mac);
         gotFirstReading = false;
+        boolean wasConnected = prefs.getBoolean(PREF_CONNECTED, false);
         prefs.edit()
                 .putBoolean(PREF_CONNECTED, true)
                 .putBoolean(PREF_SUBSCRIPTION_ACKED, false)
                 .putBoolean(PREF_GOT_PUSH_UPDATE, false)
+                .putBoolean(PREF_ERROR_NOTIFIED, false)
                 .apply();
+        if (!wasConnected) fireConnectionNotification(true, null);
         handler.post(() -> {
             updateStatusNotification("Connected");
             BudsWidgetProvider.updateAllWidgets(this);
@@ -217,8 +249,9 @@ public class BudsConnectionService extends Service {
         });
 
         // Subscribe to push battery updates, then request an immediate read.
-        write(protocol.encodeSubscriptionSet(OppoProtocol.SUB_BATTERY));
+        write(protocol.encodeSubscriptionSet(OppoProtocol.SUB_BATTERY, OppoProtocol.SUB_GAME_MODE));
         write(protocol.encodeBatteryReq());
+        sendFirmwareRequest();
 
         handler.removeCallbacks(pollRunnable);
         scheduleBurstRetries(0);
@@ -274,6 +307,10 @@ public class BudsConnectionService extends Service {
         if (decoded.isPushedUpdate) {
             prefs.edit().putBoolean(PREF_GOT_PUSH_UPDATE, true).apply();
         }
+        if (decoded.firmwareText != null && !decoded.firmwareText.isEmpty()) {
+            prefs.edit().putString(PREF_FIRMWARE, decoded.firmwareText).apply();
+            handler.post(() -> sendBroadcast(new Intent(ACTION_LEVELS_UPDATED)));
+        }
         if (decoded.batteries.isEmpty()) {
             return;
         }
@@ -286,6 +323,14 @@ public class BudsConnectionService extends Service {
             write(protocol.encodeBatteryReq());
         } catch (IOException e) {
             Log.w(TAG, "Failed to send poll request: " + e.getMessage());
+        }
+    }
+
+    private void sendFirmwareRequest() {
+        try {
+            write(protocol.encodeFirmwareReq());
+        } catch (IOException e) {
+            Log.w(TAG, "Failed to request firmware: " + e.getMessage());
         }
     }
 
@@ -316,6 +361,8 @@ public class BudsConnectionService extends Service {
 
     private void markDisconnected() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        boolean wasConnected = prefs.getBoolean(PREF_CONNECTED, false);
+        if (wasConnected) fireConnectionNotification(false, "Disconnected");
         prefs.edit()
                 .putBoolean(PREF_CONNECTED, false)
                 // Clear stale readings outright - a percentage from before a
@@ -368,9 +415,14 @@ public class BudsConnectionService extends Service {
         long now = System.currentTimeMillis();
 
         for (OppoProtocol.BatteryInfo b : batteries) {
+            boolean wasCharging = b.index == 0 ? prefs.getBoolean(PREF_CHARGING_LEFT, false)
+                    : b.index == 1 ? prefs.getBoolean(PREF_CHARGING_RIGHT, false)
+                    : prefs.getBoolean(PREF_CHARGING_CASE, false);
             if (b.index == 0) editor.putBoolean(PREF_CHARGING_LEFT, b.charging);
             else if (b.index == 1) editor.putBoolean(PREF_CHARGING_RIGHT, b.charging);
             else if (b.index == 2) editor.putBoolean(PREF_CHARGING_CASE, b.charging);
+            if (!wasCharging && b.charging) fireChargingNotification(b, true);
+            if (b.level >= 100 && !b.charging) fireChargingNotification(b, false);
 
             if (b.index == 2) {
                 // Case: a 0% reading here means the device is actively
@@ -393,6 +445,7 @@ public class BudsConnectionService extends Service {
             }
         }
         editor.apply();
+        appendHistory(prefs, now);
 
         handler.post(() -> {
             updateStatusNotification(summaryText(getSharedPreferences(PREFS, MODE_PRIVATE)));
@@ -400,6 +453,59 @@ public class BudsConnectionService extends Service {
             sendBroadcast(new Intent(ACTION_LEVELS_UPDATED));
             requestTileRefresh();
         });
+    }
+
+    private void appendHistory(SharedPreferences prefs, long now) {
+        int l = prefs.getInt(PREF_LEFT, -1);
+        int r = prefs.getInt(PREF_RIGHT, -1);
+        int c = prefs.getInt(PREF_CASE, -1);
+        String old = prefs.getString(PREF_HISTORY, "");
+        if (!old.isEmpty()) {
+            String[] existing = old.split("\\n");
+            if (existing.length > 0) {
+                try {
+                    long last = Long.parseLong(existing[existing.length - 1].split(",")[0]);
+                    if (now - last < 30_000L) return;
+                } catch (Exception ignored) {}
+            }
+        }
+        String line = now + "," + l + "," + r + "," + c;
+        String combined = old.isEmpty() ? line : old + "\n" + line;
+        String[] rows = combined.split("\\n");
+        int start = Math.max(0, rows.length - 720);
+        StringBuilder kept = new StringBuilder();
+        for (int i = start; i < rows.length; i++) {
+            if (kept.length() > 0) kept.append('\n');
+            kept.append(rows[i]);
+        }
+        prefs.edit().putString(PREF_HISTORY, kept.toString()).apply();
+    }
+
+    private void fireConnectionNotification(boolean connected, String detail) {
+        String title = connected ? "Earbuds connected" : "Earbuds disconnected";
+        String text = connected ? summaryText(getSharedPreferences(PREFS, MODE_PRIVATE))
+                : (detail == null ? "Connection lost" : detail);
+        Notification n = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_headphones)
+                .setAutoCancel(true)
+                .build();
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(connected ? 10 : 11, n);
+    }
+
+    private void fireChargingNotification(OppoProtocol.BatteryInfo b, boolean started) {
+        String slot = b.index == 0 ? "Left earbud" : b.index == 1 ? "Right earbud" : "Charging case";
+        String text = started ? slot + " is charging" : slot + " is fully charged";
+        Notification n = new NotificationCompat.Builder(this, CHANNEL_ALERTS)
+                .setContentTitle(started ? "Charging started" : "Fully charged")
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_headphones)
+                .setAutoCancel(true)
+                .build();
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(20 + b.index, n);
     }
 
     private String summaryText(SharedPreferences prefs) {
@@ -437,12 +543,20 @@ public class BudsConnectionService extends Service {
                 this, 0, new Intent(this, MainActivity.class),
                 PendingIntent.FLAG_IMMUTABLE);
 
+        PendingIntent refresh = PendingIntent.getService(
+                this, 41, new Intent(this, BudsConnectionService.class).setAction(ACTION_REFRESH_BATTERY),
+                PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stop = PendingIntent.getService(
+                this, 42, new Intent(this, BudsConnectionService.class).setAction(ACTION_STOP_MONITORING),
+                PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CHANNEL_STATUS)
                 .setContentTitle("Devices")
                 .setContentText(text)
                 .setSmallIcon(R.drawable.ic_headphones)
                 .setOngoing(true)
                 .setContentIntent(openApp)
+                .addAction(0, "Refresh", refresh)
+                .addAction(0, "Stop", stop)
                 .build();
     }
 
